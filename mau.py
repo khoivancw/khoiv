@@ -1,6 +1,7 @@
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 from PIL import Image, ImageTk
+import sqlite3
 import time
 import cv2
 import pytesseract
@@ -8,12 +9,26 @@ import pytesseract
 # Cấu hình Tesseract OCR (nếu cần)
 # pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
-# Dữ liệu bãi đậu xe
-total_motorbike_spots = 5
-total_car_spots = 5
-motorbike_spots = []
-car_spots = []
-parking_history = []
+# Cấu hình cơ sở dữ liệu
+DB_NAME = "parking.db"
+
+# Hàm khởi tạo cơ sở dữ liệu
+def initialize_database():
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS parking (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        license_plate TEXT NOT NULL,
+        time_in TEXT NOT NULL,
+        time_out TEXT,
+        fee REAL,
+        vehicle_type TEXT NOT NULL,
+        area TEXT NOT NULL
+    )
+    """)
+    conn.commit()
+    conn.close()
 
 # Hàm mở cửa sổ chọn ảnh
 def select_image():
@@ -40,8 +55,8 @@ def check_vehicle_type(license_plate):
     motorbike_keywords = ["AH", "H1", "AB", "C1", "E1", "G1", "F1", "K1"]
     for keyword in motorbike_keywords:
         if keyword in license_plate:
-            return 'motorbike'
-    return 'car'
+            return 'motorbike', "Khu A"
+    return 'car', "Khu B"
 
 # Tính phí đậu xe
 def calculate_parking_fee(vehicle_type, time_in):
@@ -54,23 +69,20 @@ def calculate_parking_fee(vehicle_type, time_in):
         fee = 2000 * hours_parked
     return round(fee, 2)
 
-# Lưu xe vào bãi đậu
-def park_vehicle(tree, license_plate, vehicle_type):
+# Lưu xe vào cơ sở dữ liệu
+def park_vehicle(tree, license_plate, vehicle_type, area):
     time_in = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
-    if vehicle_type == 'motorbike':
-        if len(motorbike_spots) < total_motorbike_spots:
-            motorbike_spots.append((license_plate, time.time()))
-            tree.insert("", "end", values=(license_plate, time_in, "None", "None", "Xe máy", "Khu A"))
-            messagebox.showinfo("Thông báo", f"Xe máy {license_plate} đã được đậu vào khu A.")
-        else:
-            messagebox.showwarning("Bãi đậu đầy", "Khu A (xe máy) đã đầy.")
-    else:
-        if len(car_spots) < total_car_spots:
-            car_spots.append((license_plate, time.time()))
-            tree.insert("", "end", values=(license_plate, time_in, "None", "None", "Ô tô", "Khu B"))
-            messagebox.showinfo("Thông báo", f"Ô tô {license_plate} đã được đậu vào khu B.")
-        else:
-            messagebox.showwarning("Bãi đậu đầy", "Khu B (ô tô) đã đầy.")
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+    INSERT INTO parking (license_plate, time_in, vehicle_type, area)
+    VALUES (?, ?, ?, ?)
+    """, (license_plate, time_in, vehicle_type, area))
+    conn.commit()
+    conn.close()
+
+    tree.insert("", "end", values=(license_plate, time_in, "None", "None", vehicle_type, area))
+    messagebox.showinfo("Thông báo", f"{vehicle_type.capitalize()} {license_plate} đã được đậu vào {area}.")
 
 # Xử lý xe vào bãi
 def process_parking(tree, image_canvas):
@@ -86,8 +98,8 @@ def process_parking(tree, image_canvas):
         # Nhận diện biển số
         license_plate_text = recognize_plate(image_path)
         if license_plate_text and license_plate_text != "UNKNOWN":
-            vehicle_type = check_vehicle_type(license_plate_text)
-            park_vehicle(tree, license_plate_text, vehicle_type)
+            vehicle_type, area = check_vehicle_type(license_plate_text)
+            park_vehicle(tree, license_plate_text, vehicle_type, area)
         else:
             messagebox.showwarning("Không nhận diện được", "Không thể nhận diện biển số từ ảnh này.")
     else:
@@ -110,21 +122,28 @@ def process_exit(tree):
     fee = calculate_parking_fee(vehicle_type, time_in)
     time_out = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime())
 
-    # Cập nhật bảng và xóa khỏi danh sách
-    tree.item(selected_item, values=(license_plate, time_in_str, time_out, f"{fee} VND", vehicle_type, item["values"][5]))
-    if vehicle_type == "Xe máy":
-        motorbike_spots[:] = [spot for spot in motorbike_spots if spot[0] != license_plate]
-    else:
-        car_spots[:] = [spot for spot in car_spots if spot[0] != license_plate]
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("""
+    UPDATE parking
+    SET time_out = ?, fee = ?
+    WHERE license_plate = ? AND time_out IS NULL
+    """, (time_out, fee, license_plate))
+    conn.commit()
+    conn.close()
 
+    tree.item(selected_item, values=(license_plate, time_in_str, time_out, f"{fee} VND", vehicle_type, item["values"][5]))
     messagebox.showinfo("Thanh toán", f"Phí đậu xe cho {license_plate} là {fee} VND.")
 
 # Xóa tất cả dữ liệu
 def clear_all(tree):
-    for item in tree.get_children():
-        tree.delete(item)
-    motorbike_spots.clear()
-    car_spots.clear()
+    conn = sqlite3.connect(DB_NAME)
+    cursor = conn.cursor()
+    cursor.execute("DELETE FROM parking")
+    conn.commit()
+    conn.close()
+
+    tree.delete(*tree.get_children())
     messagebox.showinfo("Thông báo", "Đã xóa tất cả dữ liệu trong bãi đậu.")
 
 # Giao diện người dùng
@@ -178,5 +197,6 @@ def create_gui():
 
     root.mainloop()
 
-# Chạy giao diện người dùng
+# Chạy chương trình
+initialize_database()
 create_gui()
